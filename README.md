@@ -1,8 +1,8 @@
 [![GitHub Build Status](https://github.com/inotify-tools/inotify-tools/actions/workflows/build.yml/badge.svg)](https://github.com/inotify-tools/inotify-tools/actions)
 [![Coverity Build Status](https://scan.coverity.com/projects/23295/badge.svg)](https://scan.coverity.com/projects/inotifytools)
 
-inotify-tools
-=============
+Intrusion-Checking-CLI
+======================
 
 This is a package of some commandline utilities relating to inotify.
 
