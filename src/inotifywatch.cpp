@@ -147,9 +147,10 @@ int main(int argc, char** argv) {
 		events |= IN_ISDIR;
 
 	FileList list(argc, argv);
-	construct_path_list(argc, argv, fromfile, &list);
+	if (!construct_path_list(argc, argv, fromfile, &list))
+		return EXIT_FAILURE;
 
-	if (0 == list.watch_files_[0]) {
+	if (!list.watch_files_[0]) {
 		fprintf(stderr, "No files specified to watch!\n");
 		return EXIT_FAILURE;
 	}

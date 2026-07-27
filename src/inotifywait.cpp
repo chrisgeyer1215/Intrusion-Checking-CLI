@@ -58,8 +58,7 @@ static bool parse_opts(int* argc,
 void print_help(const char *tool_name);
 
 static const char* csv_escape_len(const char* string, size_t len) {
-	static char csv[MAX_STRLEN + 1];
-	static unsigned int i, ind;
+	static char csv[(MAX_STRLEN * 2) + 3];
 
 	if (string == NULL) {
 		return "";
@@ -70,25 +69,25 @@ static const char* csv_escape_len(const char* string, size_t len) {
 	}
 
 	// May not need escaping
-	if (!strchr(string, '"') && !strchr(string, ',') &&
-	    !strchr(string, '\n') && string[0] != ' ' &&
+	if (!memchr(string, '"', len) && !memchr(string, ',', len) &&
+	    !memchr(string, '\n', len) && string[0] != ' ' &&
 	    string[len - 1] != ' ') {
-		strncpy(csv, string, len);
+		memcpy(csv, string, len);
 		csv[len] = '\0';
 		return csv;
 	}
 
 	// OK, so now we _do_ need escaping.
 	csv[0] = '"';
-	ind = 1;
-	for (i = 0; i < len; ++i) {
-		if (string[i] == '"') {
-			csv[ind++] = '"';
+	size_t output_index = 1;
+	for (size_t input_index = 0; input_index < len; ++input_index) {
+		if (string[input_index] == '"') {
+			csv[output_index++] = '"';
 		}
-		csv[ind++] = string[i];
+		csv[output_index++] = string[input_index];
 	}
-	csv[ind++] = '"';
-	csv[ind] = '\0';
+	csv[output_index++] = '"';
+	csv[output_index] = '\0';
 
 	return csv;
 }
@@ -243,9 +242,10 @@ int main(int argc, char** argv) {
 		events |= IN_ISDIR;
 
 	FileList list(argc, argv);
-	construct_path_list(argc, argv, fromfile, &list);
+	if (!construct_path_list(argc, argv, fromfile, &list))
+		return EXIT_FAILURE;
 
-	if (0 == list.watch_files_[0]) {
+	if (!list.watch_files_[0]) {
 		fprintf(stderr, "No files specified to watch!\n");
 
 		return EXIT_FAILURE;
