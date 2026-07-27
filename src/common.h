@@ -22,15 +22,17 @@ struct FileList {
 
 	FileList(int argc, char** argv);
 	~FileList();
+	FileList(const FileList&) = delete;
+	FileList& operator=(const FileList&) = delete;
 };
 
-void construct_path_list(int argc,
+bool construct_path_list(int argc,
 			 char** argv,
 			 char const* filename,
 			 FileList* list);
 
 void warn_inotify_init_error(int fanotify);
 
-bool is_timeout_option_valid(long* timeout, char* o);
+bool is_timeout_option_valid(long* timeout, const char* option);
 
 #endif

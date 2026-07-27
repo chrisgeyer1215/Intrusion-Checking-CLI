@@ -14,8 +14,82 @@
 
 #include <inotifytools/inotifytools.h>
 
-#define MAXLEN 4096
-#define LIST_CHUNK 1024
+namespace {
+
+constexpr size_t kMaxPathLength = 4096;
+constexpr size_t kInitialListCapacity = 1024;
+
+void free_path_list(char const** paths) {
+	if (!paths)
+		return;
+
+	for (size_t i = 0; paths[i]; ++i)
+		free(const_cast<char*>(paths[i]));
+
+	free(paths);
+}
+
+bool append_path(char const*** paths,
+		 size_t* count,
+		 size_t* capacity,
+		 const char* path) {
+	if (*count + 1 >= *capacity) {
+		const size_t new_capacity = *capacity * 2;
+		if (new_capacity <= *capacity) {
+			errno = ENOMEM;
+			return false;
+		}
+
+		auto resized = static_cast<char const**>(
+		    realloc(*paths, sizeof(char*) * new_capacity));
+		if (!resized)
+			return false;
+
+		*paths = resized;
+		*capacity = new_capacity;
+	}
+
+	char* copy = strdup(path);
+	if (!copy)
+		return false;
+
+	(*paths)[(*count)++] = copy;
+	(*paths)[*count] = nullptr;
+	return true;
+}
+
+void trim_line_ending(char* line) {
+	size_t length = strlen(line);
+	while (length > 0 &&
+	       (line[length - 1] == '\n' || line[length - 1] == '\r')) {
+		line[--length] = '\0';
+	}
+}
+
+struct InputFile {
+	FILE* stream = nullptr;
+	bool is_stdin = false;
+
+	InputFile() = default;
+	InputFile(const InputFile&) = delete;
+	InputFile& operator=(const InputFile&) = delete;
+
+	~InputFile() {
+		if (stream)
+			fclose(stream);
+	}
+
+	bool open(const char* filename) {
+		stream = fopen(filename, "r");
+		return stream != nullptr;
+	}
+
+	FILE* get() const {
+		return is_stdin ? stdin : stream;
+	}
+};
+
+} // namespace
 
 void print_event_descriptions() {
 	printf(
@@ -41,9 +115,9 @@ void print_event_descriptions() {
 }
 
 int isdir(char const* path) {
-	static struct stat my_stat;
+	struct stat path_stat;
 
-	if (-1 == lstat(path, &my_stat)) {
+	if (-1 == lstat(path, &path_stat)) {
 		if (errno == ENOENT)
 			return 0;
 		fprintf(stderr, "Stat failed on %s: %s\n", path,
@@ -51,154 +125,84 @@ int isdir(char const* path) {
 		return 0;
 	}
 
-	return S_ISDIR(my_stat.st_mode) && !S_ISLNK(my_stat.st_mode);
+	return S_ISDIR(path_stat.st_mode) && !S_ISLNK(path_stat.st_mode);
 }
 
 FileList::FileList(int argc, char** argv)
-    : watch_files_(0), exclude_files_(0), argc_(argc), argv_(argv) {}
+    : watch_files_(nullptr), exclude_files_(nullptr), argc_(argc), argv_(argv) {}
 
 FileList::~FileList() {
-	for (int i = 0; watch_files_[i]; ++i) {
-		free((void*)watch_files_[i]);
-	}
-
-	free(watch_files_);
-
-	for (int i = 0; exclude_files_[i]; ++i) {
-		free((void*)exclude_files_[i]);
-	}
-
-	free(exclude_files_);
+	free_path_list(watch_files_);
+	free_path_list(exclude_files_);
 }
 
-struct file {
-	FILE* file_;
-	bool is_stdin;
-
-	FILE* open(const char* filename) {
-		file_ = fopen(filename, "r");
-		return file_;
-	}
-
-	FILE* get() {
-		if (is_stdin)
-			return stdin;
-
-		return file_;
-	}
-
-	file() : file_(nullptr), is_stdin(false) {}
-
-	~file() {
-		if (file_)
-			fclose(file_);
-	}
-};
-
-void construct_path_list(int argc,
+bool construct_path_list(int argc,
 			 char** argv,
 			 char const* filename,
 			 FileList* list) {
-	list->watch_files_ = 0;
-	list->exclude_files_ = 0;
-	file file;
+	InputFile input;
 
 	if (filename) {
 		if (filename[0] == '-' && !filename[1])
-			file.is_stdin = true;
-		else if (!file.open(filename)) {
+			input.is_stdin = true;
+		else if (!input.open(filename)) {
 			fprintf(stderr, "Couldn't open %s: %s\n", filename,
 				strerror(errno));
-                        return;
-                }
+			return false;
+		}
 	}
 
 	size_t watch_count = 0;
-	size_t watch_allocated = LIST_CHUNK;
+	size_t watch_capacity = kInitialListCapacity;
 	size_t exclude_count = 0;
-	size_t exclude_allocated = LIST_CHUNK;
-	list->watch_files_ = (char const**)malloc(sizeof(char*) * watch_allocated);
-	if (!list->watch_files_)
-		return;
+	size_t exclude_capacity = kInitialListCapacity;
+	list->watch_files_ = static_cast<char const**>(
+	    calloc(watch_capacity, sizeof(char*)));
+	list->exclude_files_ = static_cast<char const**>(
+	    calloc(exclude_capacity, sizeof(char*)));
+	if (!list->watch_files_ || !list->exclude_files_) {
+		fprintf(stderr, "Couldn't allocate memory for path lists.\n");
+		return false;
+	}
 
-	list->exclude_files_ = (char const**)malloc(sizeof(char*) * exclude_allocated);
-	if (!list->exclude_files_)
-		return;
+	char name[kMaxPathLength];
+	while (input.get() && fgets(name, sizeof(name), input.get())) {
+		trim_line_ending(name);
+		const size_t length = strlen(name);
 
-	char name[MAXLEN];
-	while (file.get() && fgets(name, MAXLEN, file.get())) {
-		const size_t str_len = strlen(name);
-		if (name[str_len - 1] == '\n')
-			name[str_len - 1] = 0;
-
-		if (!str_len || ('@' == name[0] && str_len == 1))
+		if (length == 0 || (name[0] == '@' && length == 1))
 			continue;
 
-		if ('@' == name[0]) {
-			if (exclude_count == exclude_allocated - 1) {
-				exclude_allocated *= 2;
-				auto mem = (char const**) realloc (list->exclude_files_, sizeof(char*) * exclude_allocated);
-				if (!mem) {
-					list->watch_files_[watch_count] = NULL;
-					list->exclude_files_[exclude_count] = NULL;
-					return;
-				}
-				list->exclude_files_ = mem;
-			}
-			list->exclude_files_[exclude_count++] =
-			    strdup(&name[1]);
-			continue;
+		const bool is_exclude = name[0] == '@';
+		const char* path = is_exclude ? &name[1] : name;
+		if (!append_path(is_exclude ? &list->exclude_files_
+					    : &list->watch_files_,
+			 is_exclude ? &exclude_count : &watch_count,
+			 is_exclude ? &exclude_capacity : &watch_capacity,
+			 path)) {
+			fprintf(stderr, "Couldn't allocate memory for path lists.\n");
+			return false;
 		}
-
-		if (watch_count == watch_allocated - 1) {
-			watch_allocated *= 2;
-			auto mem = (char const**) realloc (list->watch_files_, sizeof(char*) * watch_allocated);
-			if (!mem) {
-				list->watch_files_[watch_count] = NULL;
-				list->exclude_files_[exclude_count] = NULL;
-				return;
-			}
-			list->watch_files_ = mem;
-		}
-		list->watch_files_[watch_count++] = strdup(name);
 	}
 
 	for (int i = 0; i < argc; ++i) {
-		const size_t str_len = strlen(argv[i]);
-		if (!str_len || ('@' == argv[i][0] && str_len == 1))
+		const size_t length = strlen(argv[i]);
+		if (length == 0 || (argv[i][0] == '@' && length == 1))
 			continue;
 
-		if ('@' == argv[i][0]) {
-			if (exclude_count == exclude_allocated - 1) {
-				exclude_allocated *= 2;
-				auto mem = (char const**) realloc (list->exclude_files_, sizeof(char*) * exclude_allocated);
-				if (!mem) {
-					list->watch_files_[watch_count] = NULL;
-					list->exclude_files_[exclude_count] = NULL;
-					return;
-				}
-				list->exclude_files_ = mem;
-			}
-			list->exclude_files_[exclude_count++] =
-			    strdup(&argv[i][1]);
-			continue;
+		const bool is_exclude = argv[i][0] == '@';
+		const char* path = is_exclude ? &argv[i][1] : argv[i];
+		if (!append_path(is_exclude ? &list->exclude_files_
+					    : &list->watch_files_,
+			 is_exclude ? &exclude_count : &watch_count,
+			 is_exclude ? &exclude_capacity : &watch_capacity,
+			 path)) {
+			fprintf(stderr, "Couldn't allocate memory for path lists.\n");
+			return false;
 		}
-
-		if (watch_count == watch_allocated - 1) {
-			watch_allocated *= 2;
-			auto mem = (char const**) realloc (list->watch_files_, sizeof(char*) * watch_allocated);
-			if (!mem) {
-				list->watch_files_[watch_count] = NULL;
-				list->exclude_files_[exclude_count] = NULL;
-				return;
-			}
-			list->watch_files_ = mem;
-		}
-		list->watch_files_[watch_count++] = strdup(argv[i]);
 	}
 
-	list->exclude_files_[exclude_count] = 0;
-	list->watch_files_[watch_count] = 0;
+	return true;
 }
 
 void warn_inotify_init_error(int fanotify) {
@@ -224,17 +228,17 @@ void warn_inotify_init_error(int fanotify) {
 	}
 }
 
-bool is_timeout_option_valid(long* timeout, char* o) {
-	if ((o == NULL) || (*o == '\0')) {
+bool is_timeout_option_valid(long* timeout, const char* option) {
+	if ((option == nullptr) || (*option == '\0')) {
 		fprintf(stderr,
 			"The provided value is not a valid timeout value.\n"
 			"Please specify a long int value.\n");
 		return false;
 	}
 
-	char* timeout_end = NULL;
+	char* timeout_end = nullptr;
 	errno = 0;
-	*timeout = strtol(o, &timeout_end, 10);
+	*timeout = strtol(option, &timeout_end, 10);
 
 	if (errno) {
 		fprintf(stderr,
@@ -248,7 +252,7 @@ bool is_timeout_option_valid(long* timeout, char* o) {
 		fprintf(stderr,
 			"'%s' is not a valid timeout value.\n"
 			"Please specify a long int value.\n",
-			o);
+			option);
 		return false;
 	}
 
