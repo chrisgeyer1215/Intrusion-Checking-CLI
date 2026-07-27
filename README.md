@@ -12,3 +12,7 @@ from within shell scripts.  Read the man pages for further details.
 It is strongly recommended to enhance the Rust version of the codebase rather
 than the C/C++ version, so we can leave the C/C++ version RIP.
 
+Algorithm documentation
+-----------------------
+
+- [RBTree algorithm introduction](RBTREE.md)
